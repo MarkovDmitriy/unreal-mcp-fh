@@ -233,20 +233,24 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("get_actor_properties") ||
                      CommandType == TEXT("set_actor_property") ||
                      CommandType == TEXT("spawn_blueprint_actor") ||
-                     CommandType == TEXT("focus_viewport") || 
-                     CommandType == TEXT("take_screenshot"))
+                     CommandType == TEXT("focus_viewport") ||
+                     CommandType == TEXT("take_screenshot") ||
+                     CommandType == TEXT("trigger_live_coding"))
             {
                 ResultJson = EditorCommands->HandleCommand(CommandType, Params);
             }
             // Blueprint Commands
-            else if (CommandType == TEXT("create_blueprint") || 
-                     CommandType == TEXT("add_component_to_blueprint") || 
-                     CommandType == TEXT("set_component_property") || 
-                     CommandType == TEXT("set_physics_properties") || 
-                     CommandType == TEXT("compile_blueprint") || 
-                     CommandType == TEXT("set_blueprint_property") || 
+            else if (CommandType == TEXT("create_blueprint") ||
+                     CommandType == TEXT("add_component_to_blueprint") ||
+                     CommandType == TEXT("set_component_property") ||
+                     CommandType == TEXT("set_physics_properties") ||
+                     CommandType == TEXT("compile_blueprint") ||
+                     CommandType == TEXT("set_blueprint_property") ||
                      CommandType == TEXT("set_static_mesh_properties") ||
-                     CommandType == TEXT("set_pawn_properties"))
+                     CommandType == TEXT("set_pawn_properties") ||
+                     CommandType == TEXT("set_collision_profile") ||
+                     CommandType == TEXT("create_data_asset") ||
+                     CommandType == TEXT("set_data_asset_property"))
             {
                 ResultJson = BlueprintCommands->HandleCommand(CommandType, Params);
             }

@@ -63,7 +63,19 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCommand(const FString
     {
         return HandleSetPawnProperties(Params);
     }
-    
+    else if (CommandType == TEXT("set_collision_profile"))
+    {
+        return HandleSetCollisionProfile(Params);
+    }
+    else if (CommandType == TEXT("create_data_asset"))
+    {
+        return HandleCreateDataAsset(Params);
+    }
+    else if (CommandType == TEXT("set_data_asset_property"))
+    {
+        return HandleSetDataAssetProperty(Params);
+    }
+
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint command: %s"), *CommandType));
 }
 
@@ -118,12 +130,30 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
             // Try loading the class using LoadClass which is more reliable than FindObject
             const FString ClassPath = FString::Printf(TEXT("/Script/Engine.%s"), *ClassName);
             FoundClass = LoadClass<AActor>(nullptr, *ClassPath);
-            
+
             if (!FoundClass)
             {
                 // Try alternate paths if not found
                 const FString GameClassPath = FString::Printf(TEXT("/Script/Game.%s"), *ClassName);
                 FoundClass = LoadClass<AActor>(nullptr, *GameClassPath);
+            }
+
+            // Generic fallback: search every loaded module for a class with this
+            // name. Covers project-specific game modules without hardcoding paths.
+            // Try both with and without the 'A' prefix.
+            if (!FoundClass)
+            {
+                FoundClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::ExactClass);
+            }
+            if (!FoundClass && ParentClass.StartsWith(TEXT("A")) == false)
+            {
+                FoundClass = FindFirstObject<UClass>(*ParentClass, EFindFirstObjectOptions::ExactClass);
+            }
+            // Validate it's actually an AActor descendant (LoadClass<AActor> does this; the FindFirstObject path doesn't).
+            if (FoundClass && !FoundClass->IsChildOf(AActor::StaticClass()))
+            {
+                UE_LOG(LogTemp, Warning, TEXT("Found class '%s' but it is not an AActor descendant. Ignoring."), *ClassName);
+                FoundClass = nullptr;
             }
         }
 
@@ -153,9 +183,14 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
         // Mark the package dirty
         Package->MarkPackageDirty();
 
+        // Persist to disk so downstream commands (spawn_blueprint_actor uses
+        // FPackageName::DoesPackageExist) can find it.
+        const FString AssetFullPath = PackagePath + AssetName;
+        UEditorAssetLibrary::SaveAsset(AssetFullPath, /*bOnlyIfIsDirty=*/ false);
+
         TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
         ResultObj->SetStringField(TEXT("name"), AssetName);
-        ResultObj->SetStringField(TEXT("path"), PackagePath + AssetName);
+        ResultObj->SetStringField(TEXT("path"), AssetFullPath);
         return ResultObj;
     }
 
@@ -194,26 +229,26 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleAddComponentToBluepri
     UClass* ComponentClass = nullptr;
 
     // Try to find the class with exact name first
-    ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentType);
+    ComponentClass = FindFirstObject<UClass>(*ComponentType);
     
     // If not found, try with "Component" suffix
     if (!ComponentClass && !ComponentType.EndsWith(TEXT("Component")))
     {
         FString ComponentTypeWithSuffix = ComponentType + TEXT("Component");
-        ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentTypeWithSuffix);
+        ComponentClass = FindFirstObject<UClass>(*ComponentTypeWithSuffix);
     }
     
     // If still not found, try with "U" prefix
     if (!ComponentClass && !ComponentType.StartsWith(TEXT("U")))
     {
         FString ComponentTypeWithPrefix = TEXT("U") + ComponentType;
-        ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentTypeWithPrefix);
+        ComponentClass = FindFirstObject<UClass>(*ComponentTypeWithPrefix);
         
         // Try with both prefix and suffix
         if (!ComponentClass && !ComponentType.EndsWith(TEXT("Component")))
         {
             FString ComponentTypeWithBoth = TEXT("U") + ComponentType + TEXT("Component");
-            ComponentClass = FindObject<UClass>(ANY_PACKAGE, *ComponentTypeWithBoth);
+            ComponentClass = FindFirstObject<UClass>(*ComponentTypeWithBoth);
         }
     }
     
@@ -844,6 +879,13 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCompileBlueprint(cons
     // Compile the blueprint
     FKismetEditorUtilities::CompileBlueprint(Blueprint);
 
+    // Persist after compile so post-compile state survives editor restarts and
+    // downstream disk-based lookups (spawn_blueprint_actor) see a fresh BP.
+    if (UPackage* Pkg = Blueprint->GetOutermost())
+    {
+        UEditorAssetLibrary::SaveAsset(Pkg->GetName(), /*bOnlyIfIsDirty=*/ false);
+    }
+
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
     ResultObj->SetStringField(TEXT("name"), BlueprintName);
     ResultObj->SetBoolField(TEXT("compiled"), true);
@@ -1157,4 +1199,192 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetPawnProperties(con
     ResponseObj->SetBoolField(TEXT("success"), bAnyPropertiesSet);
     ResponseObj->SetObjectField(TEXT("results"), ResultsObj);
     return ResponseObj;
-} 
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetCollisionProfile(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString ComponentName;
+    if (!Params->TryGetStringField(TEXT("component_name"), ComponentName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'component_name' parameter"));
+    }
+
+    FString ProfileName;
+    Params->TryGetStringField(TEXT("profile_name"), ProfileName);
+
+    bool bSetAffectsNav = false;
+    bool bAffectsNav = true;
+    if (Params->HasField(TEXT("can_ever_affect_navigation")))
+    {
+        bSetAffectsNav = true;
+        bAffectsNav = Params->GetBoolField(TEXT("can_ever_affect_navigation"));
+    }
+
+    UBlueprint* Blueprint = FUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    // Find the SCS node for the named component, then operate on its template.
+    USCS_Node* ComponentNode = nullptr;
+    for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+    {
+        if (Node && Node->GetVariableName().ToString() == ComponentName)
+        {
+            ComponentNode = Node;
+            break;
+        }
+    }
+    if (!ComponentNode)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Component not found in blueprint: %s"), *ComponentName));
+    }
+
+    UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(ComponentNode->ComponentTemplate);
+    if (!Prim)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Component '%s' is not a UPrimitiveComponent (no collision/nav properties to set)"), *ComponentName));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("blueprint"), BlueprintName);
+    ResultObj->SetStringField(TEXT("component"), ComponentName);
+
+    if (!ProfileName.IsEmpty())
+    {
+        Prim->SetCollisionProfileName(*ProfileName);
+        ResultObj->SetStringField(TEXT("profile_name"), ProfileName);
+    }
+
+    if (bSetAffectsNav)
+    {
+        Prim->SetCanEverAffectNavigation(bAffectsNav);
+        ResultObj->SetBoolField(TEXT("can_ever_affect_navigation"), bAffectsNav);
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+    ResultObj->SetBoolField(TEXT("success"), true);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateDataAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetName;
+    if (!Params->TryGetStringField(TEXT("name"), AssetName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name' parameter"));
+    }
+
+    FString ClassName;
+    if (!Params->TryGetStringField(TEXT("class_name"), ClassName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'class_name' parameter"));
+    }
+
+    FString PackagePath = TEXT("/Game/DataAssets/");
+    Params->TryGetStringField(TEXT("package_path"), PackagePath);
+    if (!PackagePath.EndsWith(TEXT("/")))
+    {
+        PackagePath += TEXT("/");
+    }
+
+    // Resolve the asset class. Try the U-prefixed name on engine and game modules,
+    // then fall back to a generic search across loaded modules.
+    UClass* AssetClass = nullptr;
+    const FString PrefixedName = ClassName.StartsWith(TEXT("U")) ? ClassName : (TEXT("U") + ClassName);
+    const TArray<FString> Candidates = { ClassName, PrefixedName };
+    for (const FString& Name : Candidates)
+    {
+        AssetClass = LoadClass<UObject>(nullptr, *FString::Printf(TEXT("/Script/Engine.%s"), *Name));
+        if (AssetClass) break;
+        AssetClass = LoadClass<UObject>(nullptr, *FString::Printf(TEXT("/Script/Game.%s"), *Name));
+        if (AssetClass) break;
+        AssetClass = FindFirstObject<UClass>(*Name, EFindFirstObjectOptions::ExactClass);
+        if (AssetClass) break;
+    }
+
+    if (!AssetClass)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Class not found: %s"), *ClassName));
+    }
+    if (!AssetClass->IsChildOf(UDataAsset::StaticClass()))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Class '%s' is not a UDataAsset subclass"), *ClassName));
+    }
+
+    const FString FullPath = PackagePath + AssetName;
+    if (FPackageName::DoesPackageExist(FullPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset already exists at %s"), *FullPath));
+    }
+
+    UPackage* Package = CreatePackage(*FullPath);
+    UDataAsset* NewAsset = NewObject<UDataAsset>(Package, AssetClass, *AssetName, RF_Standalone | RF_Public);
+    if (!NewAsset)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create data asset"));
+    }
+
+    FAssetRegistryModule::AssetCreated(NewAsset);
+    Package->MarkPackageDirty();
+    UEditorAssetLibrary::SaveAsset(FullPath, /*bOnlyIfIsDirty=*/ false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("name"), AssetName);
+    Result->SetStringField(TEXT("class"), AssetClass->GetName());
+    Result->SetStringField(TEXT("path"), FullPath);
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetDataAssetProperty(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+    }
+
+    FString PropertyName;
+    if (!Params->TryGetStringField(TEXT("property_name"), PropertyName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_name' parameter"));
+    }
+
+    if (!Params->HasField(TEXT("property_value")))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_value' parameter"));
+    }
+
+    UObject* Asset = StaticLoadObject(UObject::StaticClass(), nullptr, *AssetPath);
+    if (!Asset)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+    }
+
+    const TSharedPtr<FJsonValue> Value = Params->Values.FindRef(TEXT("property_value"));
+    FString Err;
+    if (!FUnrealMCPCommonUtils::SetObjectProperty(Asset, PropertyName, Value, Err))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(Err);
+    }
+
+    // Notify the asset so any PostEditChangeProperty side effects fire
+    // (e.g. UHumanSchedule re-sorts its Entries by hour after a change).
+    Asset->PostEditChange();
+    Asset->MarkPackageDirty();
+    UEditorAssetLibrary::SaveAsset(AssetPath, /*bOnlyIfIsDirty=*/ false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("asset"), AssetPath);
+    Result->SetStringField(TEXT("property"), PropertyName);
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}

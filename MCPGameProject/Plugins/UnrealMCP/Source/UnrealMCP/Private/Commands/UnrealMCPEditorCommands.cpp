@@ -74,7 +74,11 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     {
         return HandleTakeScreenshot(Params);
     }
-    
+    else if (CommandType == TEXT("trigger_live_coding"))
+    {
+        return HandleTriggerLiveCoding(Params);
+    }
+
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown editor command: %s"), *CommandType));
 }
 
@@ -597,4 +601,24 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
     }
     
     return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to take screenshot"));
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTriggerLiveCoding(const TSharedPtr<FJsonObject>& Params)
+{
+    // Fire the Live Coding compile via the engine console. Compile completes
+    // asynchronously — this call returns as soon as the kick-off finishes.
+    // Use console Exec to avoid linking the LiveCoding module directly.
+    if (!GEngine)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("GEngine not available"));
+    }
+
+    const bool bExecOk = GEngine->Exec(nullptr, TEXT("LiveCoding.Compile"));
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("success"), true);
+    ResultObj->SetBoolField(TEXT("exec_recognized"), bExecOk);
+    ResultObj->SetStringField(TEXT("message"),
+        TEXT("Live Coding compile triggered. Wait for completion before next plugin-modifying commands; check editor's Live Coding console for status."));
+    return ResultObj;
 } 

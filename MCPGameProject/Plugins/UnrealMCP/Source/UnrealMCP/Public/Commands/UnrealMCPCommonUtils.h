@@ -54,6 +54,13 @@ public:
     static UK2Node_Event* FindExistingEventNode(UEdGraph* Graph, const FString& EventName);
 
     // Property utilities
-    static bool SetObjectProperty(UObject* Object, const FString& PropertyName, 
+    static bool SetObjectProperty(UObject* Object, const FString& PropertyName,
                                  const TSharedPtr<FJsonValue>& Value, FString& OutErrorMessage);
-}; 
+
+    /**
+     * Set a value at a raw memory address (typed by Property). Used to recurse
+     * into struct fields and array elements where there is no parent UObject.
+     */
+    static bool SetPropertyValueAtAddress(FProperty* Property, void* ValueAddr,
+                                          const TSharedPtr<FJsonValue>& Value, FString& OutErrorMessage);
+};

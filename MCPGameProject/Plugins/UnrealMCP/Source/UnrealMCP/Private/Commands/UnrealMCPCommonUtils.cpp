@@ -18,7 +18,12 @@
 #include "Components/SceneComponent.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Selection.h"
+#include "Engine/World.h"
 #include "EditorAssetLibrary.h"
+#include "Editor.h"
+#include "EngineUtils.h"
+#include "Kismet/GameplayStatics.h"
+#include "UObject/SoftObjectPath.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "BlueprintNodeSpawner.h"
@@ -509,7 +514,36 @@ UK2Node_Event* FUnrealMCPCommonUtils::FindExistingEventNode(UEdGraph* Graph, con
     return nullptr;
 }
 
-bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& PropertyName, 
+// Helper — accept a JSON value that may be the literal JSON object/array
+// embedded inside a string (since MCP property_value is a string parameter).
+// If the inbound string starts with [ or {, parse it; otherwise pass through.
+static TSharedPtr<FJsonValue> NormalizeJsonValue(const TSharedPtr<FJsonValue>& Value)
+{
+    if (!Value.IsValid() || Value->Type != EJson::String) return Value;
+    FString S = Value->AsString();
+    S = S.TrimStartAndEnd();
+    if (S.StartsWith(TEXT("[")))
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(S);
+        if (FJsonSerializer::Deserialize(Reader, Arr))
+        {
+            return MakeShared<FJsonValueArray>(Arr);
+        }
+    }
+    else if (S.StartsWith(TEXT("{")))
+    {
+        TSharedPtr<FJsonObject> Obj;
+        TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(S);
+        if (FJsonSerializer::Deserialize(Reader, Obj))
+        {
+            return MakeShared<FJsonValueObject>(Obj);
+        }
+    }
+    return Value;
+}
+
+bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& PropertyName,
                                      const TSharedPtr<FJsonValue>& Value, FString& OutErrorMessage)
 {
     if (!Object)
@@ -526,7 +560,25 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
     }
 
     void* PropertyAddr = Property->ContainerPtrToValuePtr<void>(Object);
-    
+    return SetPropertyValueAtAddress(Property, PropertyAddr, Value, OutErrorMessage);
+}
+
+bool FUnrealMCPCommonUtils::SetPropertyValueAtAddress(FProperty* Property, void* PropertyAddr,
+                                                     const TSharedPtr<FJsonValue>& InValue, FString& OutErrorMessage)
+{
+    if (!Property || !PropertyAddr)
+    {
+        OutErrorMessage = TEXT("Invalid property or address");
+        return false;
+    }
+
+    const TSharedPtr<FJsonValue> Value = NormalizeJsonValue(InValue);
+    if (!Value.IsValid())
+    {
+        OutErrorMessage = TEXT("Invalid JSON value");
+        return false;
+    }
+
     // Handle different property types
     if (Property->IsA<FBoolProperty>())
     {
@@ -539,13 +591,23 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
         FIntProperty* IntProperty = CastField<FIntProperty>(Property);
         if (IntProperty)
         {
-            IntProperty->SetPropertyValue_InContainer(Object, IntValue);
+            IntProperty->SetPropertyValue(PropertyAddr, IntValue);
             return true;
         }
     }
     else if (Property->IsA<FFloatProperty>())
     {
         ((FFloatProperty*)Property)->SetPropertyValue(PropertyAddr, Value->AsNumber());
+        return true;
+    }
+    else if (Property->IsA<FDoubleProperty>())
+    {
+        ((FDoubleProperty*)Property)->SetPropertyValue(PropertyAddr, Value->AsNumber());
+        return true;
+    }
+    else if (Property->IsA<FInt64Property>())
+    {
+        ((FInt64Property*)Property)->SetPropertyValue(PropertyAddr, static_cast<int64>(Value->AsNumber()));
         return true;
     }
     else if (Property->IsA<FStrProperty>())
@@ -568,7 +630,7 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
                 ByteProp->SetPropertyValue(PropertyAddr, ByteValue);
                 
                 UE_LOG(LogTemp, Display, TEXT("Setting enum property %s to numeric value: %d"), 
-                      *PropertyName, ByteValue);
+                      *Property->GetName(), ByteValue);
                 return true;
             }
             // Handle string enum value
@@ -583,7 +645,7 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
                     ByteProp->SetPropertyValue(PropertyAddr, ByteValue);
                     
                     UE_LOG(LogTemp, Display, TEXT("Setting enum property %s to numeric string value: %s -> %d"), 
-                          *PropertyName, *EnumValueName, ByteValue);
+                          *Property->GetName(), *EnumValueName, ByteValue);
                     return true;
                 }
                 
@@ -605,7 +667,7 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
                     ByteProp->SetPropertyValue(PropertyAddr, static_cast<uint8>(EnumValue));
                     
                     UE_LOG(LogTemp, Display, TEXT("Setting enum property %s to name value: %s -> %lld"), 
-                          *PropertyName, *EnumValueName, EnumValue);
+                          *Property->GetName(), *EnumValueName, EnumValue);
                     return true;
                 }
                 else
@@ -646,7 +708,7 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
                 UnderlyingNumericProp->SetIntPropertyValue(PropertyAddr, EnumValue);
                 
                 UE_LOG(LogTemp, Display, TEXT("Setting enum property %s to numeric value: %lld"), 
-                      *PropertyName, EnumValue);
+                      *Property->GetName(), EnumValue);
                 return true;
             }
             // Handle string enum value
@@ -661,7 +723,7 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
                     UnderlyingNumericProp->SetIntPropertyValue(PropertyAddr, EnumValue);
                     
                     UE_LOG(LogTemp, Display, TEXT("Setting enum property %s to numeric string value: %s -> %lld"), 
-                          *PropertyName, *EnumValueName, EnumValue);
+                          *Property->GetName(), *EnumValueName, EnumValue);
                     return true;
                 }
                 
@@ -683,7 +745,7 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
                     UnderlyingNumericProp->SetIntPropertyValue(PropertyAddr, EnumValue);
                     
                     UE_LOG(LogTemp, Display, TEXT("Setting enum property %s to name value: %s -> %lld"), 
-                          *PropertyName, *EnumValueName, EnumValue);
+                          *Property->GetName(), *EnumValueName, EnumValue);
                     return true;
                 }
                 else
@@ -703,7 +765,122 @@ bool FUnrealMCPCommonUtils::SetObjectProperty(UObject* Object, const FString& Pr
         }
     }
     
-    OutErrorMessage = FString::Printf(TEXT("Unsupported property type: %s for property %s"), 
-                                    *Property->GetClass()->GetName(), *PropertyName);
+    else if (Property->IsA<FNameProperty>())
+    {
+        FNameProperty* NameProp = CastField<FNameProperty>(Property);
+        NameProp->SetPropertyValue(PropertyAddr, FName(*Value->AsString()));
+        return true;
+    }
+    else if (Property->IsA<FTextProperty>())
+    {
+        FTextProperty* TextProp = CastField<FTextProperty>(Property);
+        TextProp->SetPropertyValue(PropertyAddr, FText::FromString(Value->AsString()));
+        return true;
+    }
+    else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Property))
+    {
+        // Accept either an asset path ("/Game/Foo/Bar") or a live actor name in the
+        // current editor world. First match by class wins.
+        const FString RefStr = Value->AsString();
+        UObject* FoundObject = nullptr;
+
+        if (RefStr.StartsWith(TEXT("/")))
+        {
+            FoundObject = StaticLoadObject(ObjProp->PropertyClass, nullptr, *RefStr);
+        }
+
+        if (!FoundObject)
+        {
+            // Search live actors in the editor world by GetName().
+            if (UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr)
+            {
+                for (TActorIterator<AActor> It(World); It; ++It)
+                {
+                    AActor* A = *It;
+                    if (A && A->GetName() == RefStr && A->IsA(ObjProp->PropertyClass))
+                    {
+                        FoundObject = A;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (FoundObject)
+        {
+            ObjProp->SetObjectPropertyValue(PropertyAddr, FoundObject);
+            return true;
+        }
+        OutErrorMessage = FString::Printf(TEXT("Could not resolve object reference '%s' for property %s"), *RefStr, *Property->GetName());
+        return false;
+    }
+    else if (FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Property))
+    {
+        FSoftObjectPath Path(Value->AsString());
+        SoftProp->SetPropertyValue(PropertyAddr, FSoftObjectPtr(Path));
+        return true;
+    }
+    else if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+    {
+        // Expect a JSON object whose keys map to UPROPERTY field names on the struct.
+        if (Value->Type != EJson::Object)
+        {
+            OutErrorMessage = FString::Printf(TEXT("Struct property '%s' requires a JSON object value"), *Property->GetName());
+            return false;
+        }
+        const TSharedPtr<FJsonObject>& Obj = Value->AsObject();
+        UScriptStruct* StructType = StructProp->Struct;
+
+        for (const auto& Pair : Obj->Values)
+        {
+            FProperty* FieldProp = StructType->FindPropertyByName(*Pair.Key);
+            if (!FieldProp)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("Struct field '%s' not found on %s; skipping"),
+                       *Pair.Key, *StructType->GetName());
+                continue;
+            }
+            void* FieldAddr = FieldProp->ContainerPtrToValuePtr<void>(PropertyAddr);
+
+            FString FieldError;
+            if (!SetPropertyValueAtAddress(FieldProp, FieldAddr, Pair.Value, FieldError))
+            {
+                OutErrorMessage = FString::Printf(TEXT("Struct '%s' field '%s': %s"),
+                                                  *StructType->GetName(), *Pair.Key, *FieldError);
+                return false;
+            }
+        }
+        return true;
+    }
+    else if (FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property))
+    {
+        if (Value->Type != EJson::Array)
+        {
+            OutErrorMessage = FString::Printf(TEXT("Array property '%s' requires a JSON array value"), *Property->GetName());
+            return false;
+        }
+        const TArray<TSharedPtr<FJsonValue>>& Arr = Value->AsArray();
+        FProperty* InnerProp = ArrayProp->Inner;
+
+        FScriptArrayHelper Helper(ArrayProp, PropertyAddr);
+        Helper.Resize(Arr.Num());
+
+        for (int32 i = 0; i < Arr.Num(); ++i)
+        {
+            void* ElemAddr = Helper.GetRawPtr(i);
+
+            FString ElemError;
+            if (!SetPropertyValueAtAddress(InnerProp, ElemAddr, Arr[i], ElemError))
+            {
+                OutErrorMessage = FString::Printf(TEXT("Array '%s' element %d: %s"),
+                                                  *Property->GetName(), i, *ElemError);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    OutErrorMessage = FString::Printf(TEXT("Unsupported property type: %s for property %s"),
+                                    *Property->GetClass()->GetName(), *Property->GetName());
     return false;
-} 
+}
