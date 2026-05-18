@@ -1377,7 +1377,7 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleSetDataAssetProperty(
     }
 
     // Notify the asset so any PostEditChangeProperty side effects fire
-    // (e.g. UHumanSchedule re-sorts its Entries by hour after a change).
+    // (e.g. data assets that re-sort or recompute caches when their fields change).
     Asset->PostEditChange();
     Asset->MarkPackageDirty();
     UEditorAssetLibrary::SaveAsset(AssetPath, /*bOnlyIfIsDirty=*/ false);
