@@ -1,119 +1,113 @@
 <div align="center">
 
 # Model Context Protocol for Unreal Engine
-<span style="color: #555555">unreal-mcp</span>
+<span style="color: #555555">unreal-mcp · fork</span>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.5%2B-orange)](https://www.unrealengine.com)
+[![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.6%2B-orange)](https://www.unrealengine.com)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-yellow)](https://www.python.org)
-[![Status](https://img.shields.io/badge/Status-Experimental-red)](https://github.com/chongdashu/unreal-mcp)
+[![Status](https://img.shields.io/badge/Status-Beta-yellow)](#)
 
 </div>
 
-This project enables AI assistant clients like Cursor, Windsurf and Claude Desktop to control Unreal Engine through natural language using the Model Context Protocol (MCP).
+This is a **fork** of [chongdashu/unreal-mcp](https://github.com/chongdashu/unreal-mcp) that
+brings the plugin forward to UE 5.6 / 5.7 and substantially extends what the
+agent can do inside the editor — most importantly, a recursive property setter
+that handles nested structs, arrays of structs, asset references, soft refs,
+text / name, and live actor lookups, plus first-class data-asset authoring and
+in-editor Live Coding triggered from MCP.
 
-## ⚠️ Experimental Status
+See [CHANGELOG.md](./CHANGELOG.md) for the full delta against upstream.
 
-This project is currently in an **EXPERIMENTAL** state. The API, functionality, and implementation details are subject to significant changes. While we encourage testing and feedback, please be aware that:
+## ⚠️ Status
 
-- Breaking changes may occur without notice
-- Features may be incomplete or unstable
-- Documentation may be outdated or missing
-- Production use is not recommended at this time
+Beta. Built daily against UE 5.6 / 5.7. The upstream "experimental" warning
+still applies to the surface area inherited from the original project — APIs
+will keep moving as agent-driven workflows mature. Don't ship a production
+project against a pinned version without a known-good commit hash.
 
-## 🌟 Overview
-
-The Unreal MCP integration provides comprehensive tools for controlling Unreal Engine through natural language:
+## 🌟 What you can drive from MCP
 
 | Category | Capabilities |
-|----------|-------------|
-| **Actor Management** | • Create and delete actors (cubes, spheres, lights, cameras, etc.)<br>• Set actor transforms (position, rotation, scale)<br>• Query actor properties and find actors by name<br>• List all actors in the current level |
-| **Blueprint Development** | • Create new Blueprint classes with custom components<br>• Add and configure components (mesh, camera, light, etc.)<br>• Set component properties and physics settings<br>• Compile Blueprints and spawn Blueprint actors<br>• Create input mappings for player controls |
-| **Blueprint Node Graph** | • Add event nodes (BeginPlay, Tick, etc.)<br>• Create function call nodes and connect them<br>• Add variables with custom types and default values<br>• Create component and self references<br>• Find and manage nodes in the graph |
-| **Editor Control** | • Focus viewport on specific actors or locations<br>• Control viewport camera orientation and distance |
+|----------|--------------|
+| **Actor management** | Spawn / delete actors (engine types directly, custom C++ types via Blueprint wrap), set transforms, query properties, list and find by name |
+| **Property editing** | Read / write properties on actors **and** on data assets. Setter handles bool, int, float, double, int64, FName, FString, FText, enum (byte + class), object refs (asset path or live actor name), soft object refs, **structs (recursive)**, **arrays (incl. arrays of structs)** |
+| **Blueprint development** | Create Blueprint classes (with proper parent-class lookup that finds project-defined parents, not just `/Script/Engine`), add and configure components, set static-mesh / physics / **collision profile** / `bCanEverAffectNavigation`, compile (auto-saved), spawn instances |
+| **Blueprint node graph** | Event nodes, function-call nodes, variable get / set, connections, self and component references, find nodes |
+| **Data assets** | Create new `UDataAsset` subclasses, set any UPROPERTY on them (using the same setter as actors), auto-save, fire `PostEditChange` so the asset's side effects run |
+| **Editor control** | Focus viewport on actors or locations, take screenshots |
+| **Build loop** | Trigger Live Coding compile from MCP so plugin / game-module code changes hot-reload without leaving the editor |
+| **UMG widgets** | Create widget blueprints, add text blocks / buttons, bind events, add to viewport |
 
-All these capabilities are accessible through natural language commands via AI assistants, making it easy to automate and control Unreal Engine workflows.
+All callable via natural language through any MCP client.
 
 ## 🧩 Components
 
-### Sample Project (MCPGameProject) `MCPGameProject`
-- Based off the Blank Project, but with the UnrealMCP plugin added.
+### Plugin (`MCPGameProject/Plugins/UnrealMCP`)
+- Native TCP server on `127.0.0.1:55557`
+- Editor-only module — does not link into shipping builds
+- Marshals all command handlers onto the game thread
 
-### Plugin (UnrealMCP) `MCPGameProject/Plugins/UnrealMCP`
-- Native TCP server for MCP communication
-- Integrates with Unreal Editor subsystems
-- Implements actor manipulation tools
-- Handles command execution and response handling
+### Sample Project (`MCPGameProject`)
+- Empty starter project with the plugin already enabled
+- Drop-in baseline for testing — copy the plugin folder into your own project to use it there
 
-### Python MCP Server `Python/unreal_mcp_server.py`
-- Implemented in `unreal_mcp_server.py`
-- Manages TCP socket connections to the C++ plugin (port 55557)
-- Handles command serialization and response parsing
-- Provides error handling and connection management
-- Loads and registers tool modules from the `tools` directory
-- Uses the FastMCP library to implement the Model Context Protocol
+### Python MCP server (`Python/unreal_mcp_server.py`)
+- FastMCP-based, registers tool modules from `tools/`
+- Maintains the TCP socket to the editor
+- 180-second per-request timeout (was 5 s upstream — needed for cold class loads)
 
 ## 📂 Directory Structure
 
-- **MCPGameProject/** - Example Unreal project
-  - **Plugins/UnrealMCP/** - C++ plugin source
-    - **Source/UnrealMCP/** - Plugin source code
-    - **UnrealMCP.uplugin** - Plugin definition
+- **`MCPGameProject/`** — example UE project with the plugin pre-configured
+  - **`Plugins/UnrealMCP/`** — plugin source
+    - **`Source/UnrealMCP/`** — C++ source
+    - **`UnrealMCP.uplugin`** — plugin descriptor
+- **`Python/`** — Python MCP server + tool modules
+  - **`tools/`** — tool registrations (actor, blueprint, node, editor, project, UMG)
+  - **`scripts/`** — example helper scripts
+- **`Docs/`** — long-form docs
+- **`CHANGELOG.md`** — version history (fork-specific changes are listed here)
 
-- **Python/** - Python server and tools
-  - **tools/** - Tool modules for actor, editor, and blueprint operations
-  - **scripts/** - Example scripts and demos
-
-- **Docs/** - Comprehensive documentation
-  - See [Docs/README.md](Docs/README.md) for documentation index
-
-## 🚀 Quick Start Guide
+## 🚀 Quick Start
 
 ### Prerequisites
-- Unreal Engine 5.5+
-- Python 3.12+
-- MCP Client (e.g., Claude Desktop, Cursor, Windsurf)
 
-### Sample project
+- **Unreal Engine 5.6 or newer** (5.5 will not compile — see CHANGELOG)
+- **Python 3.12+**
+- **`uv`** (Python package runner) — install from <https://astral.sh/uv>
+- An MCP client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.)
 
-For getting started quickly, feel free to use the starter project in `MCPGameProject`. This is a UE 5.5 Blank Starter Project with the `UnrealMCP.uplugin` already configured. 
+### Option A — use the sample project
 
-1. **Prepare the project**
-   - Right-click your .uproject file
-   - Generate Visual Studio project files
-2. **Build the project (including the plugin)**
-   - Open solution (`.sln`)
-   - Choose `Development Editor` as your target.
-   - Build
+`MCPGameProject` is a Blank Project with the plugin already added.
 
-### Plugin
-Otherwise, if you want to use the plugin in your existing project:
+1. Right-click `.uproject` → **Generate Visual Studio project files**
+2. Open the `.sln`, choose **Development Editor / Win64**, build
+3. Open the project in the editor
 
-1. **Copy the plugin to your project**
-   - Copy `MCPGameProject/Plugins/UnrealMCP` to your project's Plugins folder
+### Option B — add the plugin to your own project
 
-2. **Enable the plugin**
-   - Edit > Plugins
-   - Find "UnrealMCP" in Editor category
-   - Enable the plugin
-   - Restart editor when prompted
+1. Copy `MCPGameProject/Plugins/UnrealMCP` into your project's `Plugins/` folder
+2. Right-click `.uproject` → **Generate Visual Studio project files**
+3. Build with **Development Editor / Win64** (or your platform target)
+4. Open in editor — **Edit → Plugins**, find **UnrealMCP** under *Editor*, verify it's enabled, restart if prompted
 
-3. **Build the plugin**
-   - Right-click your .uproject file
-   - Generate Visual Studio project files
-   - Open solution (`.sln)
-   - Build with your target platform and output settings
+The plugin starts its TCP listener automatically when the editor loads.
 
-### Python Server Setup
+### Python server setup
 
-See [Python/README.md](Python/README.md) for detailed Python setup instructions, including:
-- Setting up your Python environment
-- Running the MCP server
-- Using direct or server-based connections
+```sh
+# from the repo root
+cd Python
+uv sync          # installs the FastMCP + helper deps the server uses
+```
 
-### Configuring your MCP Client
+See [`Python/README.md`](./Python/README.md) for environment options.
 
-Use the following JSON for your mcp configuration based on your MCP client.
+### MCP client configuration
+
+Use this JSON for any FastMCP-compatible client:
 
 ```json
 {
@@ -122,7 +116,7 @@ Use the following JSON for your mcp configuration based on your MCP client.
       "command": "uv",
       "args": [
         "--directory",
-        "<path/to/the/folder/PYTHON>",
+        "<absolute/path/to/Python>",
         "run",
         "unreal_mcp_server.py"
       ]
@@ -131,25 +125,127 @@ Use the following JSON for your mcp configuration based on your MCP client.
 }
 ```
 
-An example is found in `mcp.json`
+An example lives in `mcp.json` at the repo root.
 
-### MCP Configuration Locations
+| MCP Client | Configuration File Location |
+|---|---|
+| Claude Code (CLI) | Add via `claude mcp add unreal-mcp -- uv --directory <PYTHON_DIR> run unreal_mcp_server.py` |
+| Claude Desktop | `~/.config/claude-desktop/mcp.json` — on Windows: `%USERPROFILE%\.config\claude-desktop\mcp.json` |
+| Cursor | `.cursor/mcp.json` — project root |
+| Windsurf | `~/.config/windsurf/mcp.json` — on Windows: `%USERPROFILE%\.config\windsurf\mcp.json` |
 
-Depending on which MCP client you're using, the configuration file location will differ:
+### Verify the connection
 
-| MCP Client | Configuration File Location | Notes |
-|------------|------------------------------|-------|
-| Claude Desktop | `~/.config/claude-desktop/mcp.json` | On Windows: `%USERPROFILE%\.config\claude-desktop\mcp.json` |
-| Cursor | `.cursor/mcp.json` | Located in your project root directory |
-| Windsurf | `~/.config/windsurf/mcp.json` | On Windows: `%USERPROFILE%\.config\windsurf\mcp.json` |
+1. Open the editor with the plugin loaded — confirm `MCPServer: Listening on 127.0.0.1:55557` in the Output Log
+2. Start your MCP client
+3. Ask the agent to *"list all actors in the current level"* — you should get a JSON dump of actors
 
-Each client uses the same JSON format as shown in the example above. 
-Simply place the configuration in the appropriate location for your MCP client.
+## 🛠 Common workflows
 
+### Spawn a project-defined C++ actor
 
-## License
-MIT
+The plugin's `spawn_actor` only supports engine-side types (StaticMeshActor,
+PointLight, etc). For project-defined C++ classes (your characters, your AI
+controllers, your custom actors), wrap them in a Blueprint first:
 
-## Questions
+```
+create_blueprint(name="BP_MyActor", parent_class="MyActor")
+compile_blueprint("BP_MyActor")             # autosaves to /Game/Blueprints/
+spawn_blueprint_actor(blueprint_name="BP_MyActor", actor_name="MyActor_1", location=[0,0,100])
+```
 
-For questions, you can reach me on X/Twitter: [@chongdashu](https://www.x.com/chongdashu)
+Parent-class lookup falls back to a generic `FindFirstObject<UClass>` search,
+so project-module classes from `/Script/YourGame.YourClass` resolve without
+explicit paths.
+
+### Edit a nested struct or array-of-structs in one call
+
+The property setter accepts JSON for any UPROPERTY-typed field. Pass nested
+objects for structs and arrays for `TArray<FStruct>`:
+
+```python
+set_actor_property(
+    name="MySpawner_1",
+    property_name="Spawns",
+    property_value=[
+        {
+            "ActorClass":  "/Game/Blueprints/BP_MyActor.BP_MyActor_C",
+            "DisplayName": "Alice",
+            "SpawnTransform": {
+                "Translation": {"X": 0, "Y": 0, "Z": 200},
+                "Rotation":    {"X": 0, "Y": 0, "Z": 0, "W": 1},
+                "Scale3D":     {"X": 1, "Y": 1, "Z": 1}
+            },
+            "Schedule": "/Game/Data/DA_Schedule_A.DA_Schedule_A",
+            "HomeActor": "POI_Home_01"   // live-actor lookup by name
+        }
+    ]
+)
+```
+
+Object reference fields accept either:
+- An asset path (`/Game/...`) — loaded via `StaticLoadObject`
+- A live actor name — looked up in the editor world via `TActorIterator`
+
+### Author a data asset
+
+```python
+create_data_asset(name="DA_MyConfig", class_name="MyConfigDataAsset", package_path="/Game/Data/")
+set_data_asset_property(
+    asset_path="/Game/Data/DA_MyConfig.DA_MyConfig",
+    property_name="Entries",
+    property_value=[...]
+)
+```
+
+`set_data_asset_property` fires `PostEditChange()` after every write so any
+side effects (e.g. arrays that re-sort or caches that rebuild) run as if the
+user had edited the asset in the editor.
+
+### Toggle collision / nav on a Blueprint component
+
+```python
+set_collision_profile(
+    blueprint_name="BP_MyCharacter",
+    component_name="CosmeticMesh",
+    profile_name="NoCollision",
+    can_ever_affect_navigation=False
+)
+```
+
+### Iterate on plugin code without leaving the editor
+
+Patch C++ in `Plugins/UnrealMCP/Source/` then:
+
+```python
+trigger_live_coding()
+```
+
+Equivalent to pressing **Ctrl+Alt+F11** in the editor. Asynchronous — watch
+the Live Coding console for `Patching complete!` before invoking the
+newly-patched commands. Python tool registrations still need a fresh MCP
+server session.
+
+## 🔧 Known issues (carried from upstream)
+
+These are non-blocking but flagged for future cleanup — see CHANGELOG for
+detail:
+
+- `Json.h` is included as a monolithic header in several files (~10 IWYU
+  warnings)
+- `HandleTakeScreenshot` uses the deprecated
+  `FImageUtils::CompressImageArray` (still compiles in 5.7, will break in a
+  future engine version)
+
+## 📜 License
+
+MIT, inherited from the upstream project.
+
+## 🙏 Credits
+
+Upstream: <https://github.com/chongdashu/unreal-mcp> — original plugin and
+the Python MCP scaffolding.
+
+This fork adds UE 5.6 / 5.7 compatibility, the recursive property setter,
+data-asset authoring, collision/nav helpers, MCP-driven Live Coding, and the
+auto-save / parent-class-lookup improvements documented above.
