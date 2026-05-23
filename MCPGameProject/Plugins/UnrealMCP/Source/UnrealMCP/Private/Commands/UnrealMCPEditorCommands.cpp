@@ -20,6 +20,11 @@
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "UnrealMCPModule.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/PlatformProcess.h"
+#include "ILiveCodingModule.h"
+#include "EngineUtils.h"
 
 FUnrealMCPEditorCommands::FUnrealMCPEditorCommands()
 {
@@ -77,6 +82,18 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     else if (CommandType == TEXT("trigger_live_coding"))
     {
         return HandleTriggerLiveCoding(Params);
+    }
+    else if (CommandType == TEXT("get_live_coding_status"))
+    {
+        return HandleGetLiveCodingStatus(Params);
+    }
+    else if (CommandType == TEXT("get_static_mesh_actors_with_bounds"))
+    {
+        return HandleGetStaticMeshActorsWithBounds(Params);
+    }
+    else if (CommandType == TEXT("bulk_spawn_nav_modifier_volumes"))
+    {
+        return HandleBulkSpawnNavModifierVolumes(Params);
     }
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown editor command: %s"), *CommandType));
@@ -204,6 +221,15 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActor(const TShared
     else if (ActorType == TEXT("CameraActor"))
     {
         NewActor = World->SpawnActor<ACameraActor>(ACameraActor::StaticClass(), Location, Rotation, SpawnParams);
+    }
+    else if (ActorType == TEXT("NavModifierVolume"))
+    {
+        // Look up at runtime so we don't link NavigationSystem statically.
+        UClass* Cls = FindFirstObject<UClass>(TEXT("NavModifierVolume"), EFindFirstObjectOptions::ExactClass);
+        if (Cls)
+        {
+            NewActor = World->SpawnActor<AActor>(Cls, Location, Rotation, SpawnParams);
+        }
     }
     else
     {
@@ -603,22 +629,256 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
     return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to take screenshot"));
 }
 
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetLiveCodingStatus(const TSharedPtr<FJsonObject>& Params)
+{
+    const FLiveCodingState State = FUnrealMCPModule::GetLiveCodingState();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("is_compiling"), State.bCompiling);
+    Result->SetBoolField(TEXT("has_result"), State.bHasResult);
+
+    if (State.bHasResult)
+    {
+        const double NowSeconds = FPlatformTime::Seconds();
+        const double Age = FMath::Max(0.0, NowSeconds - State.LastFinishTimeSeconds);
+        Result->SetNumberField(TEXT("seconds_since_last_finish"), Age);
+    }
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTriggerLiveCoding(const TSharedPtr<FJsonObject>& Params)
 {
-    // Fire the Live Coding compile via the engine console. Compile completes
-    // asynchronously — this call returns as soon as the kick-off finishes.
-    // Use console Exec to avoid linking the LiveCoding module directly.
-    if (!GEngine)
+    // Use the LiveCoding module directly so we can verify the compile actually
+    // kicked off. GEngine->Exec was unreliable — returned true for the
+    // recognized console-command name regardless of whether LC honored it.
+
+    ILiveCodingModule* LC = FModuleManager::GetModulePtr<ILiveCodingModule>("LiveCoding");
+    if (!LC)
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("GEngine not available"));
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("LiveCoding module not loaded"));
     }
 
-    const bool bExecOk = GEngine->Exec(nullptr, TEXT("LiveCoding.Compile"));
-
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
-    ResultObj->SetBoolField(TEXT("success"), true);
-    ResultObj->SetBoolField(TEXT("exec_recognized"), bExecOk);
-    ResultObj->SetStringField(TEXT("message"),
-        TEXT("Live Coding compile triggered. Wait for completion before next plugin-modifying commands; check editor's Live Coding console for status."));
+
+    if (LC->IsCompiling())
+    {
+        ResultObj->SetBoolField(TEXT("success"), true);
+        ResultObj->SetBoolField(TEXT("already_compiling"), true);
+        ResultObj->SetBoolField(TEXT("is_compiling_now"), true);
+        ResultObj->SetStringField(TEXT("message"), TEXT("Live Coding already compiling — request ignored."));
+        return ResultObj;
+    }
+
+    if (!LC->IsEnabledForSession())
+    {
+        LC->EnableForSession(true);
+    }
+    if (!LC->IsEnabledByDefault())
+    {
+        // Best-effort; not all UE versions expose a setter, but enabling for
+        // the session is the important bit.
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("UnrealMCP: trigger_live_coding invoked, calling LC->Compile()"));
+    LC->Compile();
+
+    // Give LC's worker pipeline a brief moment to flip IsCompiling=true. If it
+    // doesn't, the caller knows the trigger didn't take. (probe)
+    FPlatformProcess::Sleep(0.15f);
+    const bool bIsCompilingNow = LC->IsCompiling();
+
+    ResultObj->SetBoolField(TEXT("success"), bIsCompilingNow);
+    ResultObj->SetBoolField(TEXT("already_compiling"), false);
+    ResultObj->SetBoolField(TEXT("is_compiling_now"), bIsCompilingNow);
+    ResultObj->SetStringField(TEXT("message"), bIsCompilingNow
+        ? TEXT("Live Coding compile started. Poll get_live_coding_status or call wait_for_live_coding.")
+        : TEXT("LC->Compile() called but IsCompiling did not flip — likely no code changes detected, or LC disabled."));
     return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleGetStaticMeshActorsWithBounds(const TSharedPtr<FJsonObject>& Params)
+{
+    // Optional substring filter on mesh asset path (case-insensitive).
+    FString MeshFilter;
+    Params->TryGetStringField(TEXT("mesh_filter"), MeshFilter);
+    const bool bHasFilter = !MeshFilter.IsEmpty();
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : GWorld;
+    if (!World)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world available"));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> EntryArray;
+
+    for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+    {
+        AStaticMeshActor* Actor = *It;
+        if (!Actor)
+        {
+            continue;
+        }
+
+        UStaticMeshComponent* SMC = Actor->GetStaticMeshComponent();
+        if (!SMC)
+        {
+            continue;
+        }
+
+        UStaticMesh* Mesh = SMC->GetStaticMesh();
+        const FString MeshPath = Mesh ? Mesh->GetPathName() : FString();
+
+        if (bHasFilter && MeshPath.Find(MeshFilter, ESearchCase::IgnoreCase) == INDEX_NONE)
+        {
+            continue;
+        }
+
+        // World-space bounds for the static mesh component (includes actor transform).
+        const FBoxSphereBounds Bounds = SMC->Bounds;
+        const FVector Origin = Bounds.Origin;
+        const FVector Extent = Bounds.BoxExtent;
+        const FVector BoxMin = Origin - Extent;
+        const FVector BoxMax = Origin + Extent;
+
+        TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+        Entry->SetStringField(TEXT("name"), Actor->GetName());
+        Entry->SetStringField(TEXT("mesh_path"), MeshPath);
+
+        auto WriteVec = [](TSharedPtr<FJsonObject>& Parent, const FString& Key, const FVector& V)
+        {
+            TArray<TSharedPtr<FJsonValue>> Arr;
+            Arr.Add(MakeShared<FJsonValueNumber>(V.X));
+            Arr.Add(MakeShared<FJsonValueNumber>(V.Y));
+            Arr.Add(MakeShared<FJsonValueNumber>(V.Z));
+            Parent->SetArrayField(Key, Arr);
+        };
+
+        WriteVec(Entry, TEXT("location"), Actor->GetActorLocation());
+        WriteVec(Entry, TEXT("box_min"), BoxMin);
+        WriteVec(Entry, TEXT("box_max"), BoxMax);
+        WriteVec(Entry, TEXT("extent"), Extent);
+
+        EntryArray.Add(MakeShared<FJsonValueObject>(Entry));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetArrayField(TEXT("actors"), EntryArray);
+    Result->SetNumberField(TEXT("count"), EntryArray.Num());
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleBulkSpawnNavModifierVolumes(const TSharedPtr<FJsonObject>& Params)
+{
+    // Expected params:
+    //   volumes: [{ center:[X,Y,Z], size:[X,Y,Z], name?: "..." }, ...]
+    //   area_class: "/Script/NavigationSystem.NavArea_Null" (default if absent)
+    //   name_prefix: "NavBlock_" (default)
+    const TArray<TSharedPtr<FJsonValue>>* VolumesPtr = nullptr;
+    if (!Params->TryGetArrayField(TEXT("volumes"), VolumesPtr) || !VolumesPtr)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'volumes' array"));
+    }
+
+    FString AreaClassPath = TEXT("/Script/NavigationSystem.NavArea_Null");
+    Params->TryGetStringField(TEXT("area_class"), AreaClassPath);
+
+    FString NamePrefix = TEXT("NavBlock_");
+    Params->TryGetStringField(TEXT("name_prefix"), NamePrefix);
+
+    UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : GWorld;
+    if (!World)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No editor world available"));
+    }
+
+    // Resolve NavModifierVolume class once.
+    UClass* VolumeCls = FindFirstObject<UClass>(TEXT("NavModifierVolume"), EFindFirstObjectOptions::ExactClass);
+    if (!VolumeCls)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("ANavModifierVolume class not loaded; ensure NavigationSystem module is initialized"));
+    }
+
+    // Resolve area class.
+    UClass* AreaCls = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, *AreaClassPath));
+    if (!AreaCls)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Could not load area class: %s"), *AreaClassPath));
+    }
+
+    // The AreaClass UPROPERTY on ANavModifierVolume.
+    FProperty* AreaClassProp = VolumeCls->FindPropertyByName(TEXT("AreaClass"));
+
+    int32 Spawned = 0;
+    TArray<TSharedPtr<FJsonValue>> SpawnedNames;
+
+    auto ReadVec = [](const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& Out) -> bool
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+        if (!Obj->TryGetArrayField(Key, Arr) || !Arr || Arr->Num() < 3) return false;
+        Out.X = (*Arr)[0]->AsNumber();
+        Out.Y = (*Arr)[1]->AsNumber();
+        Out.Z = (*Arr)[2]->AsNumber();
+        return true;
+    };
+
+    for (int32 Idx = 0; Idx < VolumesPtr->Num(); ++Idx)
+    {
+        const TSharedPtr<FJsonObject> Entry = (*VolumesPtr)[Idx]->AsObject();
+        if (!Entry.IsValid()) continue;
+
+        FVector Center, Size;
+        if (!ReadVec(Entry, TEXT("center"), Center)) continue;
+        if (!ReadVec(Entry, TEXT("size"), Size)) continue;
+
+        FString InstanceName;
+        if (!Entry->TryGetStringField(TEXT("name"), InstanceName))
+        {
+            InstanceName = FString::Printf(TEXT("%s%03d"), *NamePrefix, Idx);
+        }
+
+        FActorSpawnParameters SpawnParams;
+        SpawnParams.Name = *InstanceName;
+        // Avoid name-collision spin: if exists, append index suffix.
+        if (StaticFindObjectFast(nullptr, World->PersistentLevel, SpawnParams.Name) != nullptr)
+        {
+            SpawnParams.Name = *FString::Printf(TEXT("%s_AutoName"), *InstanceName);
+        }
+
+        AActor* NewActor = World->SpawnActor<AActor>(VolumeCls, Center, FRotator::ZeroRotator, SpawnParams);
+        if (!NewActor) continue;
+
+        // Default NavModifierVolume brush is roughly 200x200x200 (full-extent).
+        // Scale so the cube covers the supplied size on each axis.
+        FVector Scale(
+            FMath::Max(0.01f, Size.X / 200.f),
+            FMath::Max(0.01f, Size.Y / 200.f),
+            FMath::Max(0.01f, Size.Z / 200.f));
+        NewActor->SetActorScale3D(Scale);
+
+        // Assign AreaClass via reflection. AreaClass is a UClass* (TSubclassOf<UNavArea>).
+        if (AreaClassProp)
+        {
+            if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(AreaClassProp))
+            {
+                void* PropAddr = ObjProp->ContainerPtrToValuePtr<void>(NewActor);
+                ObjProp->SetObjectPropertyValue(PropAddr, AreaCls);
+            }
+        }
+
+        // Push the change so the nav system rebuilds.
+        NewActor->PostEditChange();
+        NewActor->MarkPackageDirty();
+
+        ++Spawned;
+        SpawnedNames.Add(MakeShared<FJsonValueString>(NewActor->GetName()));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetNumberField(TEXT("spawned"), Spawned);
+    Result->SetNumberField(TEXT("requested"), VolumesPtr->Num());
+    Result->SetArrayField(TEXT("names"), SpawnedNames);
+    Result->SetBoolField(TEXT("success"), Spawned > 0);
+    return Result;
 } 

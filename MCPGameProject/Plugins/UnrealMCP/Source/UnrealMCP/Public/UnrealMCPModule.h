@@ -3,6 +3,14 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
+struct FLiveCodingState
+{
+	bool bCompiling = false;
+	bool bHasResult = false;
+	/** Seconds since the last patch-complete event fired (FPlatformTime::Seconds() basis). */
+	double LastFinishTimeSeconds = 0.0;
+};
+
 class FUnrealMCPModule : public IModuleInterface
 {
 public:
@@ -19,4 +27,10 @@ public:
 	{
 		return FModuleManager::Get().IsModuleLoaded("UnrealMCP");
 	}
-}; 
+
+	/** Read current Live Coding status. Safe to call from any thread. */
+	static FLiveCodingState GetLiveCodingState();
+
+private:
+	FDelegateHandle PatchCompleteHandle;
+};

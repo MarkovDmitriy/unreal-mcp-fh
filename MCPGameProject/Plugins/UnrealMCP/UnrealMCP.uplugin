@@ -2,7 +2,6 @@
 	"FileVersion": 3,
 	"Version": 2,
 	"VersionName": "1.1.0",
-	"EngineVersion": "5.6.0",
 	"FriendlyName": "UnrealMCP",
 	"Description": "Model Context Protocol bridge for Unreal Engine. Lets MCP clients spawn actors, author and configure Blueprints, edit nested struct and array properties, create and edit data assets, and trigger Live Coding compiles. Requires UE 5.6+.",
 	"Category": "Editor",

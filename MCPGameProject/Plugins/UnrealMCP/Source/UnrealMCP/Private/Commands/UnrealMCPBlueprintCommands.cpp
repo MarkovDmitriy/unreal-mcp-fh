@@ -18,6 +18,8 @@
 #include "UObject/FieldPath.h"
 #include "EditorAssetLibrary.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Editor.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 
@@ -74,6 +76,14 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCommand(const FString
     else if (CommandType == TEXT("set_data_asset_property"))
     {
         return HandleSetDataAssetProperty(Params);
+    }
+    else if (CommandType == TEXT("delete_asset"))
+    {
+        return HandleDeleteAsset(Params);
+    }
+    else if (CommandType == TEXT("rename_asset"))
+    {
+        return HandleRenameAsset(Params);
     }
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint command: %s"), *CommandType));
@@ -1340,6 +1350,164 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateDataAsset(const
     Result->SetStringField(TEXT("name"), AssetName);
     Result->SetStringField(TEXT("class"), AssetClass->GetName());
     Result->SetStringField(TEXT("path"), FullPath);
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}
+
+// Normalize a user-supplied asset reference to the editor's "object path"
+// form (/Game/Foo/Bar.Bar). Accepts either package path or full object path.
+static FString NormalizeAssetObjectPath(const FString& In)
+{
+    if (In.IsEmpty()) return In;
+    // Strip /Script/Engine.SkeletalMesh' ... ' wrapper if present.
+    FString S = In;
+    int32 QuoteStart = INDEX_NONE;
+    if (S.FindChar('\'', QuoteStart))
+    {
+        const int32 QuoteEnd = S.Find(TEXT("'"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+        if (QuoteEnd > QuoteStart)
+        {
+            S = S.Mid(QuoteStart + 1, QuoteEnd - QuoteStart - 1);
+        }
+    }
+    // If no dot, append <PackageName>.<AssetName>
+    if (!S.Contains(TEXT(".")))
+    {
+        int32 LastSlash = INDEX_NONE;
+        if (S.FindLastChar('/', LastSlash))
+        {
+            const FString AssetName = S.Mid(LastSlash + 1);
+            S = S + TEXT(".") + AssetName;
+        }
+    }
+    return S;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleDeleteAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+    }
+
+    AssetPath = NormalizeAssetObjectPath(AssetPath);
+
+    if (!UEditorAssetLibrary::DoesAssetExist(AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+    }
+
+    // Close any editor tab holding the asset, then force a GC pass so the toolkit's
+    // EditingObjects array actually clears before DeleteAsset tries to tear it down.
+    // Without the GC the asset editor subsystem may still hold strong refs and
+    // UEditorAssetLibrary::DeleteAsset trips check(EditingObjects.Num() > 0) in
+    // AssetEditorToolkit::OnRequestClose, crashing the editor.
+    if (GEditor)
+    {
+        if (UAssetEditorSubsystem* AssetEditorSub = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+        {
+            if (UObject* Loaded = UEditorAssetLibrary::LoadAsset(AssetPath))
+            {
+                AssetEditorSub->CloseAllEditorsForAsset(Loaded);
+            }
+        }
+    }
+    // Best-effort: drain the slate tick + force GC so any latent toolkit teardown completes
+    // before we call DeleteAsset. CollectGarbage is the cheapest way to flush pending closures.
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge=*/ true);
+
+    const bool bSuccess = UEditorAssetLibrary::DeleteAsset(AssetPath);
+    if (!bSuccess)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to delete asset: %s (still referenced or open in an editor tab?)"), *AssetPath));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("asset_path"), AssetPath);
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleRenameAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString SrcPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), SrcPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+    }
+
+    FString NewName;
+    Params->TryGetStringField(TEXT("new_name"), NewName);
+    FString NewPackagePath;
+    Params->TryGetStringField(TEXT("new_package_path"), NewPackagePath);
+    FString DstPathParam;
+    Params->TryGetStringField(TEXT("new_path"), DstPathParam);
+
+    SrcPath = NormalizeAssetObjectPath(SrcPath);
+
+    if (!UEditorAssetLibrary::DoesAssetExist(SrcPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Source asset not found: %s"), *SrcPath));
+    }
+
+    // Build destination object path. Caller supplies either:
+    //   (a) new_path = full object path "/Game/Foo/NewName.NewName" or "/Game/Foo/NewName"
+    //   (b) new_name only — rename in place, keep same folder
+    //   (c) new_name + new_package_path — move + rename
+    FString DstPath;
+    if (!DstPathParam.IsEmpty())
+    {
+        DstPath = NormalizeAssetObjectPath(DstPathParam);
+    }
+    else if (!NewName.IsEmpty())
+    {
+        // Derive package dir from source.
+        FString SrcPkg = SrcPath;
+        int32 DotIdx;
+        if (SrcPkg.FindChar('.', DotIdx)) SrcPkg = SrcPkg.Left(DotIdx);
+        int32 LastSlash;
+        FString Dir = TEXT("/Game/");
+        if (SrcPkg.FindLastChar('/', LastSlash))
+        {
+            Dir = SrcPkg.Left(LastSlash + 1);
+        }
+        const FString Folder = NewPackagePath.IsEmpty() ? Dir : (NewPackagePath.EndsWith(TEXT("/")) ? NewPackagePath : NewPackagePath + TEXT("/"));
+        DstPath = NormalizeAssetObjectPath(Folder + NewName);
+    }
+    else
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Provide either 'new_path' or 'new_name' (+ optional 'new_package_path')"));
+    }
+
+    if (UEditorAssetLibrary::DoesAssetExist(DstPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Destination asset already exists: %s"), *DstPath));
+    }
+
+    // Mirror DeleteAsset: shut any open editor tab + GC before rename so the toolkit
+    // doesn't end up holding a stale UObject reference.
+    if (GEditor)
+    {
+        if (UAssetEditorSubsystem* AssetEditorSub = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+        {
+            if (UObject* Loaded = UEditorAssetLibrary::LoadAsset(SrcPath))
+            {
+                AssetEditorSub->CloseAllEditorsForAsset(Loaded);
+            }
+        }
+    }
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge=*/ true);
+
+    const bool bSuccess = UEditorAssetLibrary::RenameAsset(SrcPath, DstPath);
+    if (!bSuccess)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to rename asset %s -> %s"), *SrcPath, *DstPath));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("src"), SrcPath);
+    Result->SetStringField(TEXT("dst"), DstPath);
     Result->SetBoolField(TEXT("success"), true);
     return Result;
 }

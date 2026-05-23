@@ -34,4 +34,11 @@ private:
 
     // Build / live-coding commands
     TSharedPtr<FJsonObject> HandleTriggerLiveCoding(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetLiveCodingStatus(const TSharedPtr<FJsonObject>& Params);
+
+    // Static-mesh enumeration with bounds (used by nav-modifier workflows etc).
+    TSharedPtr<FJsonObject> HandleGetStaticMeshActorsWithBounds(const TSharedPtr<FJsonObject>& Params);
+
+    // Bulk-spawn NavModifierVolumes from a list of {center, size, area_class}.
+    TSharedPtr<FJsonObject> HandleBulkSpawnNavModifierVolumes(const TSharedPtr<FJsonObject>& Params);
 };

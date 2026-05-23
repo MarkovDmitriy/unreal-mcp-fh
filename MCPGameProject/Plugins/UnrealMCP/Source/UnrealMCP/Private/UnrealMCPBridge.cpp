@@ -235,7 +235,10 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("spawn_blueprint_actor") ||
                      CommandType == TEXT("focus_viewport") ||
                      CommandType == TEXT("take_screenshot") ||
-                     CommandType == TEXT("trigger_live_coding"))
+                     CommandType == TEXT("trigger_live_coding") ||
+                     CommandType == TEXT("get_live_coding_status") ||
+                     CommandType == TEXT("get_static_mesh_actors_with_bounds") ||
+                     CommandType == TEXT("bulk_spawn_nav_modifier_volumes"))
             {
                 ResultJson = EditorCommands->HandleCommand(CommandType, Params);
             }
@@ -250,7 +253,9 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("set_pawn_properties") ||
                      CommandType == TEXT("set_collision_profile") ||
                      CommandType == TEXT("create_data_asset") ||
-                     CommandType == TEXT("set_data_asset_property"))
+                     CommandType == TEXT("set_data_asset_property") ||
+                     CommandType == TEXT("delete_asset") ||
+                     CommandType == TEXT("rename_asset"))
             {
                 ResultJson = BlueprintCommands->HandleCommand(CommandType, Params);
             }

@@ -1,5 +1,6 @@
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "GameFramework/Actor.h"
+#include "JsonObjectConverter.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -489,7 +490,26 @@ TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::ActorToJsonObject(AActor* Actor, 
     ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Y));
     ScaleArray.Add(MakeShared<FJsonValueNumber>(Scale.Z));
     ActorObject->SetArrayField(TEXT("scale"), ScaleArray);
-    
+
+    if (bDetailed)
+    {
+        // Dump every reflected UPROPERTY on the actor (excluding transient/deprecated),
+        // including custom struct fields like FGameplayTagContainer. Uses the same
+        // serializer as USaveGame / FJsonObjectConverter so structs round-trip cleanly.
+        TSharedRef<FJsonObject> PropsJson = MakeShared<FJsonObject>();
+        const int64 SkipFlags  = CPF_Deprecated | CPF_Transient;
+        const int64 CheckFlags = 0; // include all that don't match SkipFlags
+        if (FJsonObjectConverter::UStructToJsonObject(
+                Actor->GetClass(),
+                Actor,
+                PropsJson,
+                CheckFlags,
+                SkipFlags))
+        {
+            ActorObject->SetObjectField(TEXT("properties"), PropsJson);
+        }
+    }
+
     return ActorObject;
 }
 
